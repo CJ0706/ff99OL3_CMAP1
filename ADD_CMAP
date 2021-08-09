@@ -1,0 +1,1289 @@
+#!/usr/bin/perl
+# 
+# This script is to insert CMAP energy term into AMBER topology file
+# version 1.1
+# Please cite: doi 
+use strict;
+use Getopt::Std;
+use vars qw ( $perllibdir );
+#$perllibdir="$ENV{PDBPTRAJDIR}" if (defined $ENV{PDBPTRAJDIR});
+#($perllibdir=$0) =~ s/(\/*)[^\/]+$// if (!defined $perllibdir);
+#use lib $perllibdir;
+print STDERR "------------------------------------------------------------
+Transplanting CMAP into AMBER PRMTOP
+Programmed by Wei Wang, Wei Ye, Dingjue Ji, Dong Song and Hao Liu.
+Updated by Jun Chen
+------------------------------------------------------------
+";
+our $version = "Version 1.1
+13 Feb 2014\n";
+(my $pwd = $0) =~ s/(\/*)[^\/]+$//;
+$pwd = "." if $pwd eq "";
+my $AMBER_CMAP_parameter = "$pwd\/CMAP_parameter";
+our $help = "Usage:
+\$ .\/Trans_99IDPs [\033[1m\033[34m-p\033[0m AMBER_prmtop_file \033[1m\033[34m-o\033[0m output_file ]\\
+\t\033[1m\033[34m-c\033[0m CMAP-parameter-file \033[1m\033[34m-s\033[0m\\
+\t\033[1m\033[34m-v\033[0m \033[1m\033[34m-h\033[0m
+Explanation:
+\033[1m\033[34m-p\033[0m\tRequired.
+\tInput AMBER PRMTOP file generated with tleap or xleap.
+\033[1m\033[34m-o\033[0m\tRequired.
+\tOutput AMBER PRMTOP file with CMAP energy term.
+\033[1m\033[34m-c\033[0m\tOptional.
+\tSpecify user edited CMAP parameter file.
+\tDefault CMAP file is $AMBER_CMAP_parameter.
+\033[1m\033[34m-s\033[0m\tSilent Mode, optional.
+\tRun the script silently without any interacting UI.
+\tNote: In silent mode, all the proteins/RNA in the PRMTOP would
+\tbe considered to be added.
+
+\033[1m\033[34m-h\033[0m\tShow this help information.
+\033[1m\033[34m-v\033[0m\tShow version information.
+
+";
+my %options;
+my $exit = 0;
+#Define the options -c -p -o with variables and -h -v -s without variables.
+getopts("c:p:o:hvs", \%options);
+if (defined $options{h}){
+	print $help;
+	exit;
+}
+if (defined $options{v}){
+	print STDERR $version;
+	exit;
+}
+unless ($options{p}){
+	print $help;
+	print STDERR "\033[1m\033[31m!!!\033[0mPlease specify the \033[1m\033[31minput AMBER PRMTOP file\033[0m with \033[1m\033[34m-p\033[0m flag.\n";
+	$exit = 1;
+}
+
+unless ($options{o}){
+	print $help if $exit == 0;
+	print STDERR "\033[1m\033[31m!!!\033[0mPlease specify the \033[1m\033[31moutput AMBER PRMTOP file\033[0m with \033[1m\033[34m-o\033[0m flag.\n";
+	$exit = 1;
+}
+if ($exit == 1){
+	exit;
+}
+our $SILENT = 0;
+if (defined $options{s}){
+	$SILENT = 1;
+}
+if (defined $options{c}){
+	$AMBER_CMAP_parameter = $options{c};
+	print "Using user-defined CMAP parameter file. $AMBER_CMAP_parameter\n";	
+}else{
+	print "Using default CMAP parameter file. $AMBER_CMAP_parameter\n";
+}
+my $AMBER_TOP_file = $options{p};
+my $AMBER_CMAP_TOP_file = $options{o};
+
+#KNOWN RESIDUES & ABBREVIATIONS
+our @known_residues = qw /ALA ARG ASN ASP CYS CYX GLN GLU GLY HID HIE HIP ILE LEU LYS MET PHE PRO SER THR TRP TYR VAL HIS NHE ACE A C G U A5 C5 G5 U5 A3 C3 G3 U3/; ###HL add:A C G U A5 C5 G5 U5 A3 C3 G3 U3
+our @known_residues_abbr = qw /A R N D C C Q E G H H H I L K M F P S T W Y V H z x A C G U A C G U A C G U/; ###HL add: A C G U A C G U A C G U
+our @known_Protein = qw/ALA ARG ASN ASP CYS CYX GLN GLU GLY HID HIE HIP ILE LEU LYS MET PHE PRO SER THR TRP TYR VAL HIS NHE ACE/; ###HL add this line
+our @known_RNA = qw/A C G U A5 C5 G5 U5 A3 C3 G3 U3/; ###HL add this line
+my $n = 0;
+our %known_residues_abbr;
+our %known_abbr;
+foreach (@known_residues){
+	$known_residues_abbr{$_} = $known_residues_abbr[$n];
+	$known_abbr{$known_residues_abbr[$n]} = $_;
+	$n ++;
+}
+my @Disoder_promoting_residues = qw /ALA ARG ASN ASP CYS CYX GLN GLU GLY ILE LEU LYS MET PHE PRO SER THR TRP TYR VAL HIS HIE HID HIP A C G U A5 C5 G5 U5 A3 C3 G3 U3/; ###HL add:A C G U A5 C5 G5 U5 A3 C3 G3 U3
+our %Disoder_promoting_residues;
+foreach (@Disoder_promoting_residues){
+	$Disoder_promoting_residues{$_} = "yes";
+	$Disoder_promoting_residues{$known_residues_abbr{$_}} = "yes";
+}
+
+#####################################################################
+#############This part is to load the CMAP parameter################
+#####################################################################
+
+###HL comment this function
+#sub attribute{
+#    my $res=$_[0];
+#    if($res=~/[MWFVLIPAx]/){
+#        return 1;
+#    }
+#    if($res=~/[DEKRHGSYCNQTz]/){
+#        return 2;
+#    }
+#}
+###HL comment this function
+
+###HL rewrite this function start
+sub attribute{
+	my $res = $_[0];
+	my @protein_nonpolar = qw/ALA ILE LEU MET PHE PRO TRP VAL ACE/;
+	my @protein_polar = qw/ARG ASN ASP CYS CYX GLN GLU GLY HID HIE HIP HIS LYS SER THT TYR NHE/;
+	my @RNA_1 = qw/A A3 A5/;
+	my @RNA_2 = qw/C C3 C5/;
+	my @RNA_3 = qw/G G3 G5/;
+	my @RNA_4 = qw/U U3 U5/;
+	###protein
+	if(grep {$_ eq $res} @protein_nonpolar){
+		return 1;
+	}
+	elsif(grep {$_ eq $res} @protein_polar){
+		return 2;	
+	}
+	else{
+		###RNA
+		if(grep {$_ eq $res} @RNA_1){
+			return 1;
+		}
+		elsif(grep {$_ eq $res} @RNA_2){
+			return 2;
+		}
+		elsif(grep {$_ eq $res} @RNA_3){
+			return 3;	
+		}
+		elsif(grep {$_ eq $res} @RNA_4){
+			return 4;	
+		}
+	}
+}
+###HL rewrite this function end
+
+my @name_CMAP;
+my @order_CMAP; ###HL add this line: order of CMAP parameters sets-1,2,3,4,5 for RNA and 1 for protein
+my @type_CMAP;  ###HL add this line: type of CMAP protein or RNA
+my @content_CMAP;
+my @content_CMAP_number;
+my @left_CMAP;
+my @right_CMAP;
+
+
+my %number_CMAP;
+(open PAR, $AMBER_CMAP_parameter) || die "\033[1m\033[31m!!!\033[0mCMAP parameter file $AMBER_CMAP_parameter not found!\n";
+my $n = 0;
+while (<PAR>){
+	if (/FLAG\s([\w]+)_MAP(\d?)(_?[0-9]?)/){ ###HL add: (\d?) Each residues have more than one set of CMAP parameters for RNA##CJ remove one '[0-9]?'
+		print "Reading CMAP parameter of $1...\n";
+		$n ++;
+#		$left_CMAP[$n]=0;
+		$right_CMAP[$n]=0;
+
+		###HL add this condition start: check CMAP for Protein Or RNA
+		if($2){
+			$order_CMAP[$n]=$2;
+			$type_CMAP[$n]='RNA';
+		}
+		else{
+			$type_CMAP[$n]='Protein';
+			$order_CMAP[$n]=0;
+		}
+		###HL add this condition end
+		
+		my $tmpname=$1;
+		if($3=~/\_([0-9])/){
+			#print $2;
+#			$left_CMAP[$n] = $1;
+			$right_CMAP[$n] = $1;
+		}
+		my $temp = "$tmpname"."$right_CMAP[$n]"."-$order_CMAP[$n]"; ###HL remove 'known_residues_abbr' and add '-order_CMAP[$n]': change One letter to Three letter##CJ remove "$right_CMAP[$n]"
+		print "$temp\n";
+		$name_CMAP[$n] = $temp;
+		$number_CMAP{$temp} = $n;
+		$content_CMAP_number[$n] = 0;
+	}else{
+		$content_CMAP[$n] .= $_;
+		$content_CMAP_number[$n] ++;
+	}
+}
+close PAR;
+if ($n < 1){
+	print "\033[1m\033[31m!!!\033[0mCMAP parameter FORMAT error!\n";
+	exit;
+}
+foreach my $i(1 .. $n){
+	$content_CMAP_number[$i] --;
+	my $tmp = sqrt($content_CMAP_number[$i]*8);
+	#print $tmp,"\n";
+	if ($tmp =~ /^\d+$/){
+		$content_CMAP_number[$i] = $tmp;
+		print "$name_CMAP[$i] resolution: $tmp\n";
+	}else{
+		die "\033[1m\033[31m!!!\033[0mWrong number in CMAP parameter for ",$name_CMAP[$i],"!\n";
+	}
+}
+
+#####################################################################
+#############This part is to input the top file######################
+#####################################################################
+my $temp;
+my @tmp;
+my @Atom_name;
+my @Residues_name_origin;
+my @Residues_pointer;
+my %LENNARD_JONES_COEF;
+my $tt;
+my %FLAG_read;
+print STDERR "Reading PRMTOP file $AMBER_TOP_file ...";
+open TOP, $AMBER_TOP_file;
+while(<TOP>){
+	if (/FLAG ATOM_NAME/){
+		<TOP>;
+		$FLAG_read{Atom_Name} = "yes";
+		do{
+			chomp ($temp = <TOP>);
+			last if $temp =~ /^\%/;
+			for($n = 0; $n <= 76; $n += 4){
+				$tt = substr($temp, $n, 4);
+				$tt =~ s/\s+//g;
+				last if $tt eq "";
+				push @Atom_name, $tt;
+			}
+		}until(1 == 0);
+	}
+}
+close TOP;
+unless (exists $FLAG_read{Atom_Name}){
+	print STDERR "\033[1m\033[31m!!!\033[0m%FLAG ATOM_NAME not found!
+Please have a check.
+Make sure $AMBER_TOP_file is generated with tleap or xleap.
+Usually, you don\'t need to modify this file manually.\n";
+	exit;
+}
+
+open TOP, $AMBER_TOP_file;
+while(<TOP>){
+	if(/FLAG RESIDUE_LABEL/){
+		<TOP>;
+		$FLAG_read{Res_label} = "yes";
+		do{
+			chomp ($temp = <TOP>);
+			last if $temp =~ /^\%/;
+			for($n = 0; $n <= 76; $n += 4){
+				$tt = substr($temp, $n, 4);
+				$tt =~ s/\s+//g;
+				last if $tt eq "";
+				push @Residues_name_origin, $tt;
+			}
+		}until(1 == 0);
+	}
+}
+close TOP;
+unless (exists $FLAG_read{Res_label}){
+	print STDERR "\033[1m\033[31m!!!\033[0m%FLAG RESIDUE_LABEL not found!
+Please have a check.
+Make sure $AMBER_TOP_file is generated with tleap or xleap.
+Usually, you don\'t need to modify this file manually.\n";
+	exit;
+}
+open TOP, $AMBER_TOP_file;
+while(<TOP>){
+	if(/FLAG RESIDUE_POINTER/){
+		<TOP>;
+		$FLAG_read{Res_pointer} = "yes";
+		do{
+			chomp ($temp = <TOP>);
+			last if $temp =~ /^\%/;
+			for($n = 0; $n <= 72; $n += 8){
+				$tt = substr($temp, $n, 8);
+				$tt =~ s/\s+//g;
+				last if $tt eq "";
+				push @Residues_pointer, $tt;
+			}
+		}until(1 == 0);
+	}
+}
+close TOP;
+unless (exists $FLAG_read{Res_pointer}){
+	print STDERR "\033[1m\033[31m!!!\033[0m%FLAG RESIDUE_POINTER not found!
+Please have a check.
+Make sure $AMBER_TOP_file is generated with tleap or xleap.
+Usually, you don\'t need to modify this file manually.\n";
+	exit;
+}
+open TOP, $AMBER_TOP_file;
+while(<TOP>){
+	if(/FLAG LENNARD_JONES_ACOEF/){
+		<TOP>;
+		do{
+			$temp = <TOP>;
+			last if $temp =~ /^\%/;
+			$LENNARD_JONES_COEF{A} .= $temp;
+		}until(1 == 0);
+	}
+}
+close TOP;
+unless (exists $LENNARD_JONES_COEF{A}){
+	print STDERR "\033[1m\033[31m!!!\033[0m%FLAG LENNARD_JONES_ACOEF not found!
+Please have a check.
+Make sure $AMBER_TOP_file is generated with tleap or xleap.
+Usually, you don\'t need to modify this file manually.\n";
+	exit;
+}
+open TOP, $AMBER_TOP_file;
+while(<TOP>){
+	if (/FLAG LENNARD_JONES_BCOEF/){
+		<TOP>;
+		do{
+			$temp = <TOP>;
+			last if $temp =~ /^\%/;
+			$LENNARD_JONES_COEF{B} .= $temp;
+		}until(1 == 0);
+	}
+}
+close TOP;
+unless (exists $LENNARD_JONES_COEF{B}){
+	print STDERR "\033[1m\033[31m!!!\033[0m%FLAG LENNARD_JONES_BCOEF not found!
+Please have a check.
+Make sure $AMBER_TOP_file is generated with tleap or xleap.
+Usually, you don\'t need to modify this file manually.\n";
+	exit;
+}
+print "Done.\n";
+
+#
+#Specify the intrinsically disordered regions which use CMAP
+#
+
+my @Residues_name;
+my @AminoAcid_index;
+our @known_ligand;
+our %known_ligand_template;
+my $name;
+my $count = 0;
+foreach $name(@Residues_name_origin){
+	$count ++;
+	my $recognized = 0;
+	if ($known_residues_abbr{$name}){
+		push @Residues_name, $name;
+		push @AminoAcid_index, $count;
+		next;
+	}elsif ($name =~ /[\+\-]/){
+		push @Residues_name, "Ion";
+		next;
+	}elsif($name eq "WAT"){
+		push @Residues_name, "Solvent";
+		next;
+	}elsif($name =~ /^(D|R)?[AGCTU][35]?$/){
+		push @Residues_name, "NucAcid";
+		next;
+	}elsif($SILENT == 1){
+		push @Residues_name, "Others";
+		print STDERR "\033[1m\033[31m!!!\033[0mUnknown residue $name found, omitted!\n";
+		next;
+	}elsif(exists $known_ligand_template{$name}){
+		push @Residues_name, "m".$known_ligand_template{$name};
+		push @AminoAcid_index, $count;
+		next;
+	}
+	my %other_residue_detect = ();
+	foreach my $pointer($Residues_pointer[$count-1] .. $Residues_pointer[$count]-1){
+		$other_residue_detect{$Atom_name[$pointer]} = "yes";
+	}
+	unless ($other_residue_detect{N} && $other_residue_detect{CA} && $other_residue_detect{C} && $other_residue_detect{O}){
+		push @Residues_name, "Others";
+		print "\033[1m\033[31m!!!\033[0mUnknown residue $name found, omitted!\n";
+		next;
+	}
+	printf "\033[1m\033[31m!!!\033[0mAmino acid like unknown residue %s found.\nIs that a modified AA residue?[Y\/N]", $name;
+	chomp (my $select = <STDIN>);
+	if ($select =~ /^Y(es)?$/i){
+LOOP1:	
+		printf "Please tell me %s is modification of which AA.\n", $name;
+		print "Single and triple character abbreviations are both supported:";
+		chomp (my $select = <STDIN>);
+		my $tmp = "";
+		if (length $select >= 3){
+			$tmp =  uc(substr($select, 0, 3));
+			if (exists $known_residues_abbr{$tmp}){
+				print "Taking $name as modified $tmp...\n";
+				push @Residues_name, "m".$tmp;
+				push @AminoAcid_index, $count;
+				$known_ligand_template{$name} = $tmp;
+				sleep (1);
+			}else{
+				print STDERR "\033[1m\033[31m!!!\033[0mI don't know what is $select\n";
+				sleep (1);
+				goto LOOP1;
+			}
+		}elsif (length $select == 1){
+			$tmp = uc($select);
+			if (exists $known_abbr{$tmp}){
+				print "Taking $name as modified $known_abbr{$tmp}...\n";
+				push @Residues_name, "m".$known_abbr{$tmp};
+				push @AminoAcid_index, $count;
+				$known_ligand_template{$name} = $known_abbr{$tmp};
+				$recognized = 1;
+				sleep (1);
+			}else{
+				print STDERR "\033[1m\033[31m!!!\033[0mI don't know what is $select\n";
+				sleep (1);
+				goto LOOP1;
+			}
+		}else{
+			print STDERR "\033[1m\033[31m!!!\033[0mI don't know what is $select\n";
+			sleep (1);
+			goto LOOP1;
+		}
+		
+	}else{
+		printf "Taking %s as other ligand...", $name;
+		push @Residues_name, "Others";
+		sleep (1);
+		print "\n";
+	}
+}
+print "\nResidues in PRMTOP:
+Disorder-promoting residues are labelled in \033[1m\033[34mbold blue\033[0m.\n";
+print "Modified residues are labelled in \033[43m\033[37myellow background\033[0m.\n" if (keys %known_ligand_template) >0;
+print "Termini are labelled as \033[1m\033[31mTER\033[0m.\n\n";
+my %display_stats = (
+	"AA" => 0,
+	"Ion" => 0,
+	"Solvent" => 0,
+	"NucAcid" => 0,
+	"Others" => 0,
+);
+my $display_string = "";
+my $display_position = "";
+my $position = 0;
+my $length_seg = 0;
+my $once_position = 0;
+foreach $name(@Residues_name){
+	chomp $name;
+	$position ++;
+	if (exists $display_stats{$name}){
+		if ($display_stats{$name} == 1){
+			next;
+		}elsif ($display_stats{AA} == 1){
+			print $display_string,"\n";
+			print $display_position,"\n\n";
+			$display_string = "";
+			$display_position = "";
+			$length_seg = 0;
+			$once_position = 0;
+		}
+		$display_stats{AA} = 0;
+		$display_stats{Ion} = 0;
+		$display_stats{Solvent} = 0;
+		$display_stats{NucAcid} = 0;
+		$display_stats{Others} = 0;
+		
+		$display_stats{$name} = 1;
+		print "===$name===\n";
+	}elsif (exists $known_residues_abbr{$name}){
+		if ($display_stats{AA} == 0){
+			$display_stats{AA} = 1;
+		}
+		
+		$display_stats{Ion} = 0;
+		$display_stats{Solvent} = 0;
+		$display_stats{NucAcid} = 0;
+		$display_stats{Others} = 0;
+		
+		if (exists $Disoder_promoting_residues{$name}){
+			my $tmp = $known_residues_abbr{$name};
+			$display_string .= "\033[1m\033[34m$tmp\033[0m";
+		}else{
+			$display_string .= $known_residues_abbr{$name};
+		}
+		$length_seg ++;
+		$once_position ++;
+		if (($once_position % 5) != 1){
+			$display_position .= " ";
+		}else{
+			$display_position .= sprintf "%s",$position;
+			$display_string .= " " x (length ($position)-1);
+		}
+		foreach my $i($Residues_pointer[$position-1]-1 .. $Residues_pointer[$position]-2){
+			if ($Atom_name[$i] eq "OXT"){
+				$display_string .= " \033[1m\033[31mTER\033[0m ";
+				$display_position .= "     ";
+				print $display_string,"\n";
+				print $display_position,"\n\n";
+				$display_string = "";
+				$display_position = "";
+				$once_position = 0;
+				$length_seg = 0;
+				$display_stats{AA} = 0;
+				last;
+			}
+		}
+	}else{
+	#for the instance of ligand and modified amino acid residues
+		if ($display_stats{AA} == 0){
+			$display_stats{AA} = 1;
+		}
+		
+		$display_stats{Ion} = 0;
+		$display_stats{Solvent} = 0;
+		$display_stats{NucAcid} = 0;
+		$display_stats{Others} = 0;
+		
+		$once_position ++;
+		$display_string .= sprintf "\033[43m\033[37m%-5s\033[0m",$Residues_name_origin[$position-1];
+		$length_seg ++;
+		$display_position .= sprintf "%-5s",$position;
+		foreach my $i($Residues_pointer[$position-1]-1 .. $Residues_pointer[$position]-2){
+			if ($Atom_name[$i] eq "OXT"){
+				$display_string .= " \033[1m\033[31mTER\033[0m ";
+				$display_position .= "     ";
+				print $display_string,"\n";
+				print $display_position,"\n\n";
+				$display_string = "";
+				$display_position = "";
+				$once_position = 0;
+				$length_seg = 0;
+				$display_stats{AA} = 0;
+				last;
+			}
+		}
+	}
+	if ($length_seg == 50){
+		print $display_string,"\n";
+		print $display_position,"\n\n";
+		$display_string = "";
+		$display_position = "";
+		$length_seg = 0;
+		$once_position = 0;
+	}
+}
+
+my %exist_CMAP = ();
+my @selected_residue_sequence;
+my @real_selected_residue;
+my @real_selected_disorder_promoting_residue;
+my $number_CMAP_residues = 0;
+if ($SILENT == 1){
+	foreach (@AminoAcid_index){
+		push @selected_residue_sequence, $_-1;
+		$number_CMAP_residues ++;
+	}
+	print "All residues have been taken\n";
+}else{
+	START:
+	@selected_residue_sequence = ();
+	$number_CMAP_residues = 0;
+	print "\nPlease select amino acids / nucleotides.
+\"-\" and \",\" are suppoted. E.g: 1-20,35,39,40-80
+If all the residues should be considered, type \"all\"\n";
+	chomp (my $inputInformation = <STDIN>);
+	if ($inputInformation =~ /^all$/i){
+		foreach (@AminoAcid_index){
+			push @selected_residue_sequence, $_-1;
+			$number_CMAP_residues ++;
+		}
+		print "All residues have been taken\n";
+	}else{
+		my @str = split ",", $inputInformation;
+		
+		my @tmp = ();
+		foreach (@str){
+			print $_,"\n";
+			unless (@tmp = split "-", $_) {
+				print STDERR "Syntax error.\n";
+				goto START;
+			}
+			foreach ($tmp[0] .. $tmp[-1]){
+				$Residues_name[$_-1] =~ /m?(\w{1,3})/; ###HL add: 1,
+				unless (exists $known_residues_abbr{$1}){
+					print STDERR "Selection Error on $_ .\n";
+					goto START;
+				}
+				push @selected_residue_sequence, $_-1;
+				$number_CMAP_residues ++;
+			}
+			
+		}
+	}
+}
+
+for(my $i=0;$i<@selected_residue_sequence;$i++){
+	#print "$selected_residue_sequence[$i]\n";
+	#print "$Residues_name[$selected_residue_sequence[$i]]\n\n";
+	if(exists $Disoder_promoting_residues{$Residues_name[$selected_residue_sequence[$i]]}){
+		next;
+	}
+	else{
+		delete $selected_residue_sequence[$i];
+	}
+}
+
+my $environ=0;
+my @selected_residue_sequence_environ;
+my $number_CMAP_residues_environ = 0;
+
+###HL add this condistion: start (silent for enviromentally specific parameters)
+if ($SILENT == 1){
+	$environ=1;
+	foreach(@AminoAcid_index){
+		push @selected_residue_sequence_environ, $_-1;
+		$number_CMAP_residues_environ ++;
+	}
+	print "All residues have been added environmentally specific parameters\n";
+}	###HL add this condition: end
+else{
+	print "\nDo you want to add environmentally specific parameters? <Yes/No>\n";
+	chomp (my $esornot = <STDIN>);
+	if($esornot=~/^[Yy]es$/){
+		$environ=1;
+		START:
+		@selected_residue_sequence_environ = ();
+		$number_CMAP_residues_environ = 0;
+		print "\nPlease select amino acids / nucleotides for the environmentally specific parameters in selected.
+\"-\" and \",\" are suppoted. E.g: 1-20,35,39,40-80
+If all the residues should be considered, type \"all\"\n";
+		chomp (my $inputInformation = <STDIN>);
+		if ($inputInformation =~ /^all$/i){
+			foreach (@AminoAcid_index){
+				push @selected_residue_sequence_environ, $_-1;
+				$number_CMAP_residues_environ ++;
+			}
+			print "All residues have been taken\n";
+		}else{
+			my @str = split ",", $inputInformation;
+			
+			my @tmp = ();
+			foreach (@str){
+				print $_,"\n";
+				unless (@tmp = split "-", $_) {
+					print STDERR "Syntax error.\n";
+					goto START;
+				}
+				foreach ($tmp[0] .. $tmp[-1]){
+					$Residues_name[$_-1] =~ /m?(\w{1,3})/; ###HL add: 1,
+					unless (exists $known_residues_abbr{$1}){
+						print STDERR "Selection Error on $_ .\n";
+						goto START;
+					}
+					push @selected_residue_sequence_environ, $_-1;
+					$number_CMAP_residues_environ ++;
+				}
+				
+			}
+		}
+		#print "Yes!\n";
+	}
+	else{
+		$environ=0;
+		#print "No!\n";
+	}
+}
+
+###HL add this condition: start (check if the resdiues selected in env option is selected in previous option
+foreach my $selected_residue_environ(@selected_residue_sequence_environ){
+	if(grep { $_ eq $selected_residue_environ } @selected_residue_sequence){
+		next;	
+	}
+	else{
+		printf STDERR "\033[31mError: Selection %d\033[0m is no consistent with previous\n", $selected_residue_environ+1;
+		goto START;
+	}
+}
+###HL add this condition: end
+
+our %CMAP_dihedral_ATOMS =(
+		0 => "C    N    CA   C    N    CA   C    N    ",
+		1 => "O3'  P    O5'  C5'  P    O5'  C5'  C4'  ",
+		2 => "P    O5'  C5'  C4'  O5'  C5'  C4'  C3'  ",
+		3 => "O5'  C5'  C4'  C3'  C5'  C4'  C3'  O3'  ",
+		4 => "C5'  C4'  C3'  O3'  C4'  C3'  O3'  P    ",
+		5 => "C4'  C3'  O3'  P    C3'  O3'  P    O5'  ",
+		6 => "C3'  O3'  P    C3'  O3'  P    O5'  C5'  ",
+	); ###HL add this hash of dihedral atoms
+
+if($environ == 0){
+	my $i;
+	my $j;
+	foreach $i(0..$number_CMAP_residues -1){
+		foreach $j(0 .. $number_CMAP_residues - $i -2){
+			if ($selected_residue_sequence[$j] > $selected_residue_sequence[$j+1]){
+				($selected_residue_sequence[$j],$selected_residue_sequence[$j+1]) =($selected_residue_sequence[$j+1],$selected_residue_sequence[$j]);
+			}
+		}
+	}
+	foreach $i(0..$number_CMAP_residues -1){
+		my $strip = 0;
+		$j = $selected_residue_sequence[$i];
+		foreach ($Residues_pointer[$j]-1 .. $Residues_pointer[$j+1]-2){
+			###HL add this condition: start
+			if (grep {$_ eq $Residues_name_origin[$j]} @known_Protein and ($Atom_name[$_] eq "H3" or $Atom_name[$_] eq "OXT")){
+					$strip = 1;
+			}
+#			elsif(grep {$_ eq $Residues_name_origin[$j]} @known_RNA and ($Atom_name[$_] eq "HO5'" or $Atom_name[$_] eq "HO3'")){
+			elsif(grep {$_ eq $Residues_name_origin[$j]} @known_RNA and ($Atom_name[$_] eq "HO3'")){
+					$strip = 1;
+			}
+			###HL add this condition: end
+		}
+		next if $strip == 1;
+		push @real_selected_residue, $i;
+
+		push @real_selected_disorder_promoting_residue, $j;
+	}
+	print "CHECK",@real_selected_disorder_promoting_residue,"\n";
+	$number_CMAP_residues = @real_selected_disorder_promoting_residue;
+	print "CMAP parameters will add to following residues:\n";
+	$count = 0;
+	foreach (@real_selected_disorder_promoting_residue){
+		$count ++;
+		$Residues_name[$_] =~ /(m?)(\w{1,3})/; ###HL add: 1,
+		printf "%1s%3s%-4d ",$1,$2,$_+1;
+
+		###HL add this condition: start
+		my $tmp0; ###HL add this new line
+		if(grep {$_ eq $2} @known_Protein){
+			$tmp0 = "0"."$2"."0-0"; ###HL remove: $known_residues_abbr add '-0': change the keys of 'exist_CMAP' from One letter to Three letters and add order number
+			$exist_CMAP{$tmp0} = 1;
+		}
+		elsif(grep {$_ eq $2} @known_RNA){
+			foreach (6..6){ ###HL_new change 1..5 --> 1..5
+				$tmp0 = "$2"."0-"."$_"; ##CJ remove "0".
+				$exist_CMAP{$tmp0} = 1
+			}
+			$count += 0; ###HL_new change 4 --> 0
+		}
+		###HL add this condition: end
+		
+		print "\n" unless ($count % 6);
+	}
+	my $number_CMAP_total = $count; ###HL add this line: for RNA there are 5 sets of CMAP parameters
+	if ($SILENT == 0){
+		print "\nThe new PRMTOP file with CMAP parameters will be output.
+	Please make sure the input PRMTOP file is generated with ff99bsc0ChiOL3.
+	Are you sure to continue?[Y\/N]";
+		chomp (my $inputInformation = <STDIN>);
+		unless ($inputInformation =~ /^y(es)?$/i){
+			exit;
+		}
+	}
+	
+	print "\nChanges will be output to $AMBER_CMAP_TOP_file\n";
+	
+	my @exist_CMAP = keys %exist_CMAP;
+	foreach (@exist_CMAP){
+		print $_,"\n";
+	}
+	my $number_CMAP_type = @exist_CMAP;
+	my $AMBER_CMAP_Title = "%FLAG FORCE_FIELD_TYPE
+%FORMAT(i2,a78)
+ 1 CHARMM  31       *>>>>>>>>CHARMM22 All-Hydrogen Topology File for Proteins/RNA <<
+%COMMENT Transplanted from CHARMM CMAP to AMBER PRMTOP
+%COMMENT for Amber\n";
+my $AMBER_CMAP_add = "%FLAG CHARMM_UREY_BRADLEY_COUNT
+%COMMENT  V(ub) = K_ub(r_ik - R_ub)**2
+%COMMENT  Number of Urey Bradley terms and types
+
+%FORMAT(2i8)               
+     3      1
+%FLAG CHARMM_UREY_BRADLEY
+%COMMENT  List of the two atoms and its parameter index
+%COMMENT  in each UB term: i,k,index
+%FORMAT(10i8)              
+       2       5       1       3       5       1       4       5       1       
+%FLAG CHARMM_UREY_BRADLEY_FORCE_CONSTANT
+%COMMENT  K_ub: kcal/mole/A**2
+%FORMAT(5e16.8)            
+  0.00000000E+02
+%FLAG CHARMM_UREY_BRADLEY_EQUIL_VALUE
+%COMMENT  r_ub: A 
+%FORMAT(5e16.8)            
+  0.00000000E+01\n";
+$AMBER_CMAP_add .= "%FLAG CHARMM_NUM_IMPROPERS
+%COMMENT  Number of terms contributing to the
+%COMMENT  quadratic four atom improper energy term:
+%COMMENT  V(improper) = K_psi(psi - psi_0)**2
+%FORMAT(10i8)              
+     1
+%FLAG CHARMM_IMPROPERS
+%COMMENT  List of the four atoms in each improper term
+%COMMENT  i,j,k,l,index  i,j,k,l,index
+%COMMENT  where index is into the following two lists:
+%COMMENT  CHARMM_IMPROPER_{FORCE_CONSTANT,IMPROPER_PHASE}
+%FORMAT(10i8)              
+      15       5      17      16       1      
+%FLAG CHARMM_NUM_IMPR_TYPES
+%COMMENT  Number of unique parameters contributing to the
+%COMMENT  quadratic four atom improper energy term
+%FORMAT(i8)                
+      1
+%FLAG CHARMM_IMPROPER_FORCE_CONSTANT
+%COMMENT  K_psi: kcal/mole/rad**2 
+%FORMAT(5e16.8)            
+  0.00000000E+03  
+%FLAG CHARMM_IMPROPER_PHASE
+%COMMENT  psi: degrees
+%FORMAT(5e16.8)            
+  0.00000000E+00\n";
+$AMBER_CMAP_add .= "%FLAG LENNARD_JONES_14_ACOEF\n%FORMAT(5E16.8)\n";
+$AMBER_CMAP_add .= $LENNARD_JONES_COEF{A};
+$AMBER_CMAP_add .= "%FLAG LENNARD_JONES_14_BCOEF\n%FORMAT(5E16.8)\n";
+$AMBER_CMAP_add .= $LENNARD_JONES_COEF{B};
+$AMBER_CMAP_add .= "%FLAG CHARMM_CMAP_COUNT
+%COMMENT  Number of CMAP terms, number of unique CMAP parameters
+%FORMAT(2I8)\n";
+$AMBER_CMAP_add .= sprintf "%8d%8d\n",$number_CMAP_total, $number_CMAP_type; ###HL change $number_CMAP_residues --> $number_CMAP_total
+$AMBER_CMAP_add .= "%FLAG CHARMM_CMAP_RESOLUTION
+%COMMENT  Number of steps along each phi/psi CMAP axis
+%COMMENT  for each CMAP_PARAMETER grid
+%FORMAT(20I4)\n";
+	foreach (1..$number_CMAP_type){
+		$AMBER_CMAP_add .= sprintf "%4d",$content_CMAP_number[$number_CMAP{$exist_CMAP[$_-1]}];
+	}
+	$AMBER_CMAP_add .= "\n";
+	
+	$n = 1;
+	my %order;
+	foreach (keys %exist_CMAP){
+		$order{$_} = $n;
+		$AMBER_CMAP_add .= "%";
+		$AMBER_CMAP_add .= sprintf "FLAG CHARMM_CMAP_PARAMETER_%02d\n",$n;
+		$_ =~ /(\d)(\w+)(\d)-(\d)/; ###HL change this line:my @tmp1 = split(//,$_) --> $_ =~ /(\d)(\w+)(\d)-(\d)/
+		#printf "\033[34mMARK!!!!: %s\n\033[0m", $_; ###HL add this test line
+		my $triple = $2; ###HL change this line: $known_abbr{$tmp1[1]} --> $2
+		$AMBER_CMAP_add .= "\%COMMENT    $triple   $CMAP_dihedral_ATOMS{$order_CMAP[$number_CMAP{$_}]}"; ###HL change "C    N    CA   C    N    CA   C    N  " --> $CMAP_dihedral_ATOMS{order_CMAP[$number_CMAP{$_}]}
+		$AMBER_CMAP_add .= sprintf ("%4d\n", $content_CMAP_number[$number_CMAP{$_}]);
+		$AMBER_CMAP_add .= $content_CMAP[$number_CMAP{$_}];
+		$n++;
+	}
+$AMBER_CMAP_add .= "%FLAG CHARMM_CMAP_INDEX
+%COMMENT  Atom index i,j,k,l,m of the cross term
+%COMMENT  and then pointer to CHARMM_CMAP_PARAMETER_n
+%FORMAT(6I8)\n";
+#i,j,k,l,m
+#C,N,CA,C,N
+#0,1,2,3,4
+	my @dihedral_pointer = ();
+	foreach (@real_selected_disorder_promoting_residue){
+		my $i;
+		$Residues_name[$_] =~ /m?(\w{1,3})/; ###HL add: 1,
+		my $tmpleft = 0;
+		my $tmpright = 0;
+		my $res;
+		###HL add this condition: start
+		if(grep {$_ eq $1} @known_Protein){
+			$res = "$tmpleft".$1."$tmpright"."-0"; ###HL remove 'known_abbr' and add '-0'
+			foreach $i($Residues_pointer[$_-1]-1 .. $Residues_pointer[$_]-2){
+				#print $i,"||",$Atom_name[$i],"\n";
+				$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "C";	
+			}
+			foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+				$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "N";	
+				$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "CA";
+				$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "C";
+			}
+			foreach $i($Residues_pointer[$_+1]-1 .. $Residues_pointer[$_+2]-2){
+				$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "N";	
+			}
+			$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+		}
+		elsif(grep {$_ eq $1} @known_RNA){
+			###HL first CMAP: alpha-beta
+			#$res = "$tmpleft".$1."$tmpright"."-1";
+			#foreach $i($Residues_pointer[$_-1]-1 .. $Residues_pointer[$_]-2){
+			#	#print $i,"||",$Atom_name[$i],"\n";
+			#	$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "O3'";	
+			#}
+			#foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+			#	$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "P";	
+			#	$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "O5'";
+			#	$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "C5'";
+			#	$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "C4'";	
+			#}
+			#$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+
+			###HL second CMAP: beta-gamma
+			#$res = "$tmpleft".$1."$tmpright"."-2";
+			#foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+			#	$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "P";
+			#	$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "O5'";	
+			#	$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "C5'";
+			#	$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "C4'";
+			#	$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "C3'";	
+			#}
+			#$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+
+			####HL third CMAP: gamma-delta
+			#$res = "$tmpleft".$1."$tmpright"."-3";
+			#foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+			#	$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "O5'";
+			#	$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "C5'";	
+			#	$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "C4'";
+			#	$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "C3'";
+			#	$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "O3'";	
+			#}
+			#$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+
+			####HL fourth CMAP: delta-epsilon
+			#$res = "$tmpleft".$1."$tmpright"."-4";
+			#foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+			#	$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "C5'";	
+			#	$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "C4'";
+			#	$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "C3'";
+			#	$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "O3'";
+			#}
+			#foreach $i($Residues_pointer[$_+1]-1 .. $Residues_pointer[$_+2]-2){
+			#	$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "P";
+			#}
+			#$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+
+			####HL fifth CMAP: beta-gamma
+			#$res = "$tmpleft".$1."$tmpright"."-5";
+			#foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+			#	$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "C4'";	
+			#	$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "C3'";
+			#	$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "O3'";
+			#}
+			#foreach $i($Residues_pointer[$_+1]-1 .. $Residues_pointer[$_+2]-2){
+			#	$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "P";
+			#	$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "O5'";
+			#}
+			#$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+			
+			####zeta-alpha
+			$res = $1."$tmpright"."-6";
+			foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+				$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "C3'";
+				$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "O3'";
+			}
+			foreach $i($Residues_pointer[$_+1]-1 .. $Residues_pointer[$_+2]-2){
+				$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "P";
+				$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "O5'";
+				$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "C5'";
+			}
+			$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+		}
+		###HL add this condition: end
+	}
+	
+	open TOP,$AMBER_TOP_file;
+	open OUT,">$AMBER_CMAP_TOP_file";
+	my $a = <TOP>;
+	print OUT $a;
+	print OUT $AMBER_CMAP_Title;
+	while(<TOP>){
+		print OUT $_;
+	}
+	print OUT $AMBER_CMAP_add;
+	print OUT "\n";
+	close TOP;
+	close OUT;
+	print "$AMBER_CMAP_TOP_file written.\n";
+	exit(0);
+}
+
+if($environ == 1){
+	my $i;
+	my $j;
+	foreach $i(0..$number_CMAP_residues -1){
+		foreach $j(0 .. $number_CMAP_residues - $i -2){
+			if ($selected_residue_sequence[$j] > $selected_residue_sequence[$j+1]){
+				($selected_residue_sequence[$j],$selected_residue_sequence[$j+1]) =($selected_residue_sequence[$j+1],$selected_residue_sequence[$j]);
+			}
+		}
+	}
+	foreach $i(0..$number_CMAP_residues -1){
+		my $strip = 0;
+		$j = $selected_residue_sequence[$i];
+		#print $Residues_name_origin[$j], "\n"; ###HL add this line
+		foreach ($Residues_pointer[$j]-1 .. $Residues_pointer[$j+1]-2){
+			###HL add this condition: start
+			if (grep {$_ eq $Residues_name_origin[$j]} @known_Protein and ($Atom_name[$_] eq "H3" or $Atom_name[$_] eq "OXT")){
+					$strip = 1;
+			}
+#			elsif(grep {$_ eq $Residues_name_origin[$j]} @known_RNA and ($Atom_name[$_] eq "HO5'" or $Atom_name[$_] eq "HO3'")){
+			elsif(grep {$_ eq $Residues_name_origin[$j]} @known_RNA and ($Atom_name[$_] eq "HO3'")){
+					$strip = 1;
+			}
+			###HL add this condition: end
+		}
+		next if $strip == 1;
+		push @real_selected_residue, $i;
+
+		push @real_selected_disorder_promoting_residue, $j;
+	}
+	print "CHECK",@real_selected_disorder_promoting_residue,"\n";
+	$number_CMAP_residues = @real_selected_disorder_promoting_residue;
+	print "CMAP parameters will add to following residues:\n";
+	$count = 0;
+	foreach my $sel (@real_selected_disorder_promoting_residue){
+		$count ++;
+		$Residues_name[$sel] =~ /(m?)(\w{1,3})/; ###HL add: 1,
+		printf "%1s%3s%-4d ",$1,$2,$sel+1;
+		my $tmp2 = $sel;
+
+		###HL add this condition: start
+		my $tmp1;
+		my $tmp3;
+		my $tmpleft;
+		my $tmpright;
+		if(grep {$_ eq $2} @known_Protein){	
+			$tmp1="0"."$2"."0-0";	###HL remove 'known_residues_abbr' and add '-0'
+			$tmpleft = attribute($Residues_name[$tmp2-1]); ###HL remove $known_residues_abbr
+			$tmpright = attribute($Residues_name[$tmp2+1]); ###HL remove $known_residues_abbr
+			#printf "left:%s\t right:%s", $tmpleft, $tmpright; ###HL add this test line
+			$tmp3 = "$tmpleft"."$2"."$tmpright"."-0"; ###HL remove 'known_residues_abbr' and add '-0'
+			map { if($tmp2 eq $_ ) { if (exists $number_CMAP{$tmp3}) { $tmp1 = $tmp3 } } } @selected_residue_sequence_environ;
+			$exist_CMAP{$tmp1} = 1;
+		}
+		elsif(grep {$_ eq $2} @known_RNA){
+			foreach (6..6){ ###HL_new change 5 --> 1
+				$tmp1 = "$2"."0-"."$_";          ##CJ remove  "0".
+#				$tmpleft = attribute($Residues_name[$tmp2-1]);
+				$tmpright = attribute($Residues_name[$tmp2+1]);
+				$tmp3 = "$2"."$tmpright"."-"."$_";           ##CJ remove "$tmpleft".
+				map { if($tmp2 eq $_) { if (exists $number_CMAP{$tmp3}) { $tmp1 = $tmp3 } } } @selected_residue_sequence_environ;
+				$exist_CMAP{$tmp1} = 1;
+			}
+			$count += 0; ###HL count alreay ++ before  ###HL_new change 4 --> 0
+		}
+		###HL add this condition: end
+
+		print "\n" unless ($count % 6);
+	}
+	my $number_CMAP_total = $count; ###HL add this line
+	if ($SILENT == 0){
+		print "\nThe new PRMTOP file with CMAP parameters will be output.
+	Please make sure the input PRMTOP file is generated with ff99SBildn.
+	Are you sure to continue?[Y\/N]";
+		chomp (my $inputInformation = <STDIN>);
+		unless ($inputInformation =~ /^y(es)?$/i){
+			exit;
+		}
+	}
+	
+	print "\nChanges will be output to $AMBER_CMAP_TOP_file\n";
+	
+	my @exist_CMAP = keys %exist_CMAP;
+	foreach (@exist_CMAP){
+		print $_,"\n";
+	}
+	my $number_CMAP_type = @exist_CMAP;
+my $AMBER_CMAP_Title = "%FLAG FORCE_FIELD_TYPE
+%FORMAT(i2,a78)
+ 1 CHARMM  31       *>>>>>>>>CHARMM22 All-Hydrogen Topology File for Proteins <<
+%COMMENT Transplanted from CHARMM CMAP to AMBER PRMTOP
+%COMMENT for Amber\n";
+my $AMBER_CMAP_add = "%FLAG CHARMM_UREY_BRADLEY_COUNT
+%COMMENT  V(ub) = K_ub(r_ik - R_ub)**2
+%COMMENT  Number of Urey Bradley terms and types
+
+%FORMAT(2i8)               
+     3      1
+%FLAG CHARMM_UREY_BRADLEY
+%COMMENT  List of the two atoms and its parameter index
+%COMMENT  in each UB term: i,k,index
+%FORMAT(10i8)              
+       2       5       1       3       5       1       4       5       1       
+%FLAG CHARMM_UREY_BRADLEY_FORCE_CONSTANT
+%COMMENT  K_ub: kcal/mole/A**2
+%FORMAT(5e16.8)            
+  0.00000000E+02
+%FLAG CHARMM_UREY_BRADLEY_EQUIL_VALUE
+%COMMENT  r_ub: A 
+%FORMAT(5e16.8)            
+  0.00000000E+01\n";
+$AMBER_CMAP_add .= "%FLAG CHARMM_NUM_IMPROPERS
+%COMMENT  Number of terms contributing to the
+%COMMENT  quadratic four atom improper energy term:
+%COMMENT  V(improper) = K_psi(psi - psi_0)**2
+%FORMAT(10i8)              
+     1
+%FLAG CHARMM_IMPROPERS
+%COMMENT  List of the four atoms in each improper term
+%COMMENT  i,j,k,l,index  i,j,k,l,index
+%COMMENT  where index is into the following two lists:
+%COMMENT  CHARMM_IMPROPER_{FORCE_CONSTANT,IMPROPER_PHASE}
+%FORMAT(10i8)              
+      15       5      17      16       1      
+%FLAG CHARMM_NUM_IMPR_TYPES
+%COMMENT  Number of unique parameters contributing to the
+%COMMENT  quadratic four atom improper energy term
+%FORMAT(i8)                
+      1
+%FLAG CHARMM_IMPROPER_FORCE_CONSTANT
+%COMMENT  K_psi: kcal/mole/rad**2 
+%FORMAT(5e16.8)            
+  0.00000000E+03  
+%FLAG CHARMM_IMPROPER_PHASE
+%COMMENT  psi: degrees
+%FORMAT(5e16.8)            
+  0.00000000E+00\n";
+$AMBER_CMAP_add .= "%FLAG LENNARD_JONES_14_ACOEF\n%FORMAT(5E16.8)\n";
+$AMBER_CMAP_add .= $LENNARD_JONES_COEF{A};
+$AMBER_CMAP_add .= "%FLAG LENNARD_JONES_14_BCOEF\n%FORMAT(5E16.8)\n";
+$AMBER_CMAP_add .= $LENNARD_JONES_COEF{B};
+$AMBER_CMAP_add .= "%FLAG CHARMM_CMAP_COUNT
+%COMMENT  Number of CMAP terms, number of unique CMAP parameters
+%FORMAT(2I8)\n";
+$AMBER_CMAP_add .= sprintf "%8d%8d\n",$number_CMAP_total, $number_CMAP_type; ###HL change $number_CMAP_residues --> $number_CMAP_total
+$AMBER_CMAP_add .= "%FLAG CHARMM_CMAP_RESOLUTION
+%COMMENT  Number of steps along each phi/psi CMAP axis
+%COMMENT  for each CMAP_PARAMETER grid
+%FORMAT(100I4)\n";
+	foreach (1..$number_CMAP_type){
+		$AMBER_CMAP_add .= sprintf "%4d",$content_CMAP_number[$number_CMAP{$exist_CMAP[$_-1]}];
+	}
+	$AMBER_CMAP_add .= "\n";
+	
+	$n = 1;
+	my %order;
+	foreach (keys %exist_CMAP){
+		$order{$_} = $n;
+		$AMBER_CMAP_add .= "%";
+		$AMBER_CMAP_add .= sprintf "FLAG CHARMM_CMAP_PARAMETER_%02d\n",$n;
+		###HL $_ looks liks 1ALA1-0 for protein or 1A1-3 for RNA
+		$_ =~ /(\d)(\w+)(\d)-(\d)/; ###HL change this line:my @tmp = split(//,$_) --> $_ =~ /(\d)(\w+)(\d)-(\d)/
+		my $triple = $2; ###HL change: $known_abbr{$tmp[1]} --> $2
+		$AMBER_CMAP_add .= "\%COMMENT    $triple   $CMAP_dihedral_ATOMS{$order_CMAP[$number_CMAP{$_}]}"; ###HL change "C    N    CA   C    N    CA   C    N  " --> $CMAP_dihedral_ATOMS{order_CMAP[$number_CMAP{$_}]}
+		$AMBER_CMAP_add .= sprintf ("%4d\n", $content_CMAP_number[$number_CMAP{$_}]);
+		$AMBER_CMAP_add .= $content_CMAP[$number_CMAP{$_}];
+		$n++;
+	}
+$AMBER_CMAP_add .= "%FLAG CHARMM_CMAP_INDEX
+%COMMENT  Atom index i,j,k,l,m of the cross term
+%COMMENT  and then pointer to CHARMM_CMAP_PARAMETER_n
+%FORMAT(6I8)\n";
+#i,j,k,l,m
+#C,N,CA,C,N
+#0,1,2,3,4
+	my @dihedral_pointer = ();
+	foreach (@real_selected_disorder_promoting_residue){
+		my $i;
+		$Residues_name[$_] =~ /m?(\w{1,3})/; ###HL add: 1,
+		my $sel = $_;
+			
+		###HL add this condition
+		my $tmpleft;
+		my $tmpright;
+		my $tmp3;
+		my $res;
+		if(grep {$_ eq $1} @known_Protein){
+			$tmpleft = attribute($Residues_name[$sel-1]); ###HL remove '$known_residues_abbr'
+			$tmpright = attribute($Residues_name[$sel+1]); ###HL remove '$known_residues_abbr'
+			$tmp3 = "$tmpleft"."$1"."$tmpright"."-0"; ###HL remove '$known_residues_abbr' and add '-0'
+			$res = "0".$1."0-0"; ###HL remove '$known_residues_abbr' and add '-0'
+			map { if($sel eq $_ ) { if (exists $number_CMAP{$tmp3}) { $res = $tmp3 } } } @selected_residue_sequence_environ;
+			foreach $i($Residues_pointer[$_-1]-1 .. $Residues_pointer[$_]-2){
+				#print $i,"||",$Atom_name[$i],"\n";
+				$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "C"; ###HL change "C" --> "O3'"
+			}
+			foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+				$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "N";
+				$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "CA";
+				$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "C";
+			}
+			foreach $i($Residues_pointer[$_+1]-1 .. $Residues_pointer[$_+2]-2){
+				$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "N";
+			}
+			$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+		}
+		elsif(grep {$_ eq $1} @known_RNA){
+#			$tmpleft = attribute($Residues_name[$sel-1]);
+			$tmpright = attribute($Residues_name[$sel+1]);
+			###HL  first CMAP: alpha-beta
+			#$tmp3 = "$tmpleft"."$1"."$tmpright"."-1";
+			#$res = "0".$1."0-1";
+			#map { if($sel eq $_ ) { if (exists $number_CMAP{$tmp3}) { $res = $tmp3 } } } @selected_residue_sequence_environ;
+			#foreach $i($Residues_pointer[$_-1]-1 .. $Residues_pointer[$_]-2){
+			#	#print $i,"||",$Atom_name[$i],"\n";
+			#	$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "O3'";	
+			#}
+			#foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+			#	$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "P";	
+			#	$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "O5'";
+			#	$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "C5'";
+			#	$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "C4'";	
+			#}
+			#$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+			
+			####zeta-alpha
+			$tmp3 = "$1"."$tmpright"."-6";
+			$res = "0".$1."0-6";
+			map { if($sel eq $_ ) { if (exists $number_CMAP{$tmp3}) { $res = $tmp3 } } } @selected_residue_sequence_environ;
+			foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+				$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "C3'";
+				$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "O3'";
+			}
+			foreach $i($Residues_pointer[$_+1]-1 .. $Residues_pointer[$_+2]-2){
+				$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "P";
+				$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "O5'";
+				$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "C5'";	
+			}
+			$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+
+	
+			####HL second CMAP: beta-gamma
+			#$tmp3 = "$tmpleft"."$1"."$tmpright"."-2";
+			#$res = "0".$1."0"."-2";
+			#map { if($sel eq $_ ) { if (exists $number_CMAP{$tmp3}) { $res = $tmp3 } } } @selected_residue_sequence_environ;
+			#foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+			#	$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "P";
+			#	$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "O5'";	
+			#	$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "C5'";
+			#	$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "C4'";
+			#	$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "C3'";	
+			#}
+			#$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+
+			####HL third CMAP: gamma-delta
+			#$tmp3 = "$tmpleft"."$1"."$tmpright"."-3";
+			#$res = "$tmpleft".$1."$tmpright"."-3";
+			#map { if($sel eq $_ ) { if (exists $number_CMAP{$tmp3}) { $res = $tmp3 } } } @selected_residue_sequence_environ;
+			#foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+			#	$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "O5'";
+			#	$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "C5'";	
+			#	$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "C4'";
+			#	$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "C3'";
+			#	$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "O3'";	
+			#}
+			#$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+
+			####HL fourth CMAP: delta-epsilon
+			#$tmp3 = "$tmpleft"."$1"."$tmpright"."-4";
+			#$res = "$tmpleft".$1."$tmpright"."-4";
+			#map { if($sel eq $_ ) { if (exists $number_CMAP{$tmp3}) { $res = $tmp3 } } } @selected_residue_sequence_environ;
+			#foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+			#	$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "C5'";	
+			#	$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "C4'";
+			#	$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "C3'";
+			#	$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "O3'";
+			#}
+			#foreach $i($Residues_pointer[$_+1]-1 .. $Residues_pointer[$_+2]-2){
+			#	$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "P";
+			#}
+			#$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+
+			####HL fifth CMAP: beta-gamma
+			#$tmp3 = "$tmpleft"."$1"."$tmpright"."-5";
+			#$res = "$tmpleft".$1."$tmpright"."-5";
+			#map { if($sel eq $_ ) { if (exists $number_CMAP{$tmp3}) { $res = $tmp3 } } } @selected_residue_sequence_environ;
+			#foreach $i($Residues_pointer[$_]-1 .. $Residues_pointer[$_+1]-2){
+			#	$dihedral_pointer[0] = $i+1 if $Atom_name[$i] eq "C4'";	
+			#	$dihedral_pointer[1] = $i+1 if $Atom_name[$i] eq "C3'";
+			#	$dihedral_pointer[2] = $i+1 if $Atom_name[$i] eq "O3'";
+			#}
+			#foreach $i($Residues_pointer[$_+1]-1 .. $Residues_pointer[$_+2]-2){
+			#	$dihedral_pointer[3] = $i+1 if $Atom_name[$i] eq "P";
+			#	$dihedral_pointer[4] = $i+1 if $Atom_name[$i] eq "O5'";
+			#}
+			#$AMBER_CMAP_add .= sprintf "%8d%8d%8d%8d%8d%8d\n",$dihedral_pointer[0],$dihedral_pointer[1],$dihedral_pointer[2],$dihedral_pointer[3],$dihedral_pointer[4],$order{$res};
+
+		}
+	}
+	
+	open TOP,$AMBER_TOP_file;
+	open OUT,">$AMBER_CMAP_TOP_file";
+	my $a = <TOP>;
+	print OUT $a;
+	print OUT $AMBER_CMAP_Title;
+	while(<TOP>){
+		print OUT $_;
+	}
+	print OUT $AMBER_CMAP_add;
+	print OUT "\n";
+	close TOP;
+	close OUT;
+	print "$AMBER_CMAP_TOP_file written.\n";
+	exit(0);
+}
