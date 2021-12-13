@@ -22,3 +22,6 @@ Explanation:
 -v      Show version information.
 ```
 **Note: When adding the ff99OL3_CMAP1.para, do not use silent mode and do not add environmentally specific parameters.**
+
+
+###The "simulation parameter files.zip" file contains the parameter files used in the molecular dynamics simulations of all test systems in this article
